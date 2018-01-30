@@ -20,22 +20,73 @@ class DictTransformer
     private $entities = [];
 
     /**
-     * @param Item|Collection|NullableItem $resource
-     * @param array                        $includes
+     * @var array
+     */
+    private $includeRelationships = [];
+
+    /**
+     * @var EntityMapping
+     */
+    private $entityMapping;
+
+    /**
+     * DictTransformer constructor.
+     *
+     * @param EntityMapping $entityMapping
+     */
+    public function __construct(EntityMapping $entityMapping)
+    {
+        $this->entityMapping = $entityMapping;
+    }
+
+    /**
+     * @param mixed  $resource
+     * @param string $rootKey
+     * @param array  $includes
      *
      * @return array
      */
-    public function transform($resource, array $includes = [])
+    public function transform($resource, string $rootKey, array $includes = [])
     {
-        $keys = $this->transformResource($resource, $includes);
+//        $keys = $this->transformResource($resource, $includes);
+//
+//        $entities = $this->entities;
+//        $this->entities = [];
 
-        $entities = $this->entities;
-        $this->entities = [];
+//        return [
+//            'result'   => $keys,
+//            'entities' => $entities,
+//        ];
 
-        return [
-            'result'   => $keys,
-            'entities' => $entities,
-        ];
+        $this->parseIncludeRelationships($rootKey, $includes);
+
+        return [];
+    }
+
+    // produces a list of unique relationships so we can accurately collect the data we need
+    private function parseIncludeRelationships(string $rootKey, array $includes)
+    {
+        foreach($includes as $includeString)
+        {
+            $this->includeStringToRelationships($rootKey . $includeString);
+        }
+    }
+
+    private function includeStringToRelationships(string $includeString)
+    {
+        $parsedIncludes = $this->parseIncludeString($includeString);
+        $parent = $parsedIncludes['current'];
+        $children = $parsedIncludes['rest'];
+        $currentChild = $this->parseIncludeString($children)['current'];
+
+        $relationshipString = "{$parent}.{$currentChild}";
+
+        if(!isset($this->includeRelationships[$relationshipString]))
+        {
+            $this->includeRelationships[$relationshipString] = true;
+        }
+
+        $this->includeStringToRelationships($children);
     }
 
     /**
