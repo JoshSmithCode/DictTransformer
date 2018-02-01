@@ -1,25 +1,41 @@
 <?php
 
-class ForeignKey
+class ForeignKey implements RelationshipInterface
 {
 
     /**
      * @var string
      */
-    private $targetEntityKey;
+    private $targetEntity;
 
     /**
      * @var null|string
      */
-    private $idColumn;
+    private $childName;
 
     /**
-     * @param string      $targetEntityKey
-     * @param null|string $idColumn
+     * @param string      $targetEntity
+     * @param null|string $childName
      */
-    public function __construct($targetEntityKey, $idColumn = null)
+    public function __construct($targetEntity, $childName = null)
     {
-        $this->targetEntityKey = $targetEntityKey;
-        $this->idColumn = $idColumn;
+        $this->targetEntity = $targetEntity;
+        $this->childName = is_null($childName) ? $targetEntity : $childName;
+    }
+
+    /**
+     * @return string
+     */
+    public function getTargetEntity(): string
+    {
+        return $this->targetEntity;
+    }
+
+    /**
+     * @return null|string
+     */
+    public function getChildName()
+    {
+        return $this->childName;
     }
 }

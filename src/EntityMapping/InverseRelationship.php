@@ -1,6 +1,6 @@
 <?php
 
-class InverseRelationship
+class InverseRelationship implements RelationshipInterface
 {
 
     /**
@@ -9,11 +9,29 @@ class InverseRelationship
     private $targetEntity;
 
     /**
-     * @param string $targetEntity
+     * @var string|null
      */
-    public function __construct($targetEntity)
+    private $parentName;
+
+    public function __construct(string $targetEntity, string $parentName = null)
     {
         $this->targetEntity = $targetEntity;
+        $this->parentName = $parentName;
     }
 
+    /**
+     * @return string
+     */
+    public function getTargetEntity(): string
+    {
+        return $this->targetEntity;
+    }
+
+    /**
+     * @return string|null
+     */
+    public function getParentName()
+    {
+        return $this->parentName;
+    }
 }

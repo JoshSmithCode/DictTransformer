@@ -10,6 +10,11 @@ class EntityMapping
 {
     private $mapping;
 
+    /**
+     * @param Entity $entity
+     *
+     * @throws DuplicateEntityKeyException
+     */
     public function addEntity(Entity $entity)
     {
         if(isset($this->mapping[$entity->getKey()]))
@@ -20,6 +25,12 @@ class EntityMapping
         $this->mapping[$entity->getKey()] = $entity;
     }
 
+    /**
+     * @param string $key
+     *
+     * @return Entity
+     * @throws EntityKeyNotMappedException
+     */
     public function getEntity(string $key)
     {
         if(!isset($this->mapping[$key]))

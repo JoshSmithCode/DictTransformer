@@ -2,11 +2,12 @@
 
 namespace DictTransformer;
 
-use DictTransformer\Exceptions\InvalidResourceException;
 use DictTransformer\Exceptions\MissingTransformException;
 use DictTransformer\Exceptions\MissingKeyException;
-use DictTransformer\Exceptions\MissingIncludeException;
 use DictTransformer\Exceptions\InvalidIdException;
+use Entity;
+use ForeignKey;
+use InverseRelationship;
 
 /**
  * @package DictTransformer
@@ -17,12 +18,22 @@ class DictTransformer
     /**
      * @var array
      */
-    private $entities = [];
+    private $entities;
 
     /**
      * @var array
      */
-    private $includeRelationships = [];
+    private $transformedEntities;
+
+    /**
+     * @var array
+     */
+    private $includeRelationships;
+
+    /**
+     * @var array
+     */
+    private $inverseRelationships;
 
     /**
      * @var EntityMapping
@@ -48,138 +59,290 @@ class DictTransformer
      */
     public function transform($resource, string $rootKey, array $includes = [])
     {
-//        $keys = $this->transformResource($resource, $includes);
-//
-//        $entities = $this->entities;
-//        $this->entities = [];
+        $this->entities = [];
+        $this->includeRelationships = [];
+        $this->inverseRelationships = [];
+        $this->transformedEntities = [];
 
-//        return [
-//            'result'   => $keys,
-//            'entities' => $entities,
-//        ];
+        if(!is_array($resource))
+        {
+            $resource = [$resource];
+        }
+
+        $this->entities[$rootKey] = $resource;
 
         $this->parseIncludeRelationships($rootKey, $includes);
+        $this->fetchRelationships();
+        $this->transformEntities();
+        $this->reconstructInverseRelationships();
 
-        return [];
+        return [
+            'result' => $this->getKeys($resource),
+            'entities' => $this->transformedEntities
+        ];
+    }
+
+    /**
+     * @param array $resource
+     *
+     * @return array
+     */
+    private function getKeys(array $resource)
+    {
+        $ids = [];
+        foreach($resource as $item)
+        {
+            $ids[] = $item->getId();
+        }
+
+        return $ids;
     }
 
     // produces a list of unique relationships so we can accurately collect the data we need
+    /**
+     * @param string $rootKey
+     * @param array  $includes
+     */
     private function parseIncludeRelationships(string $rootKey, array $includes)
     {
+        $includeStrings = [];
         foreach($includes as $includeString)
         {
-            $this->includeStringToRelationships($rootKey . $includeString);
+            $includeStrings[] = "$rootKey.$includeString";
         }
+
+        $this->includesToRelationships($includeStrings);
     }
 
-    private function includeStringToRelationships(string $includeString)
+    /**
+     * @param array $includeStrings
+     */
+    private function includesToRelationships(array $includeStrings)
     {
-        $parsedIncludes = $this->parseIncludeString($includeString);
-        $parent = $parsedIncludes['current'];
-        $children = $parsedIncludes['rest'];
-        $currentChild = $this->parseIncludeString($children)['current'];
+        $nextIncludeStrings = [];
 
-        $relationshipString = "{$parent}.{$currentChild}";
-
-        if(!isset($this->includeRelationships[$relationshipString]))
+        foreach($includeStrings as $includeString)
         {
-            $this->includeRelationships[$relationshipString] = true;
+            $parsedIncludeString = $this->parseCurrentRelationship($includeString);
+            $currentParent = $parsedIncludeString['currentParent'];
+            $currentChild = $parsedIncludeString['currentChild'];
+
+            // If we can't parse any more relationships on this include line, just continue
+            if(!$currentChild)
+            {
+                continue;
+            }
+
+            // If we've already got this relationship, just don't set it
+            if(!isset($this->includeRelationships[$currentParent]) && !isset($this->includeRelationships[$currentParent][$currentChild]))
+            {
+                $this->includeRelationships[$currentParent][$currentChild] = $currentChild;
+            }
+
+            $nextIncludeStrings[] = $parsedIncludeString['rest'];
         }
 
-        $this->includeStringToRelationships($children);
+        if(!empty($nextIncludeStrings))
+        {
+            $this->includesToRelationships($nextIncludeStrings);
+        }
     }
 
     /**
-     * @param Item|Collection $resource
-     * @param array           $includes
+     *
+     */
+    private function fetchRelationships()
+    {
+        foreach($this->includeRelationships as $parent => $children)
+        {
+            $parentEntity = $this->entityMapping->getEntity($parent);
+
+            $this->fetchChildren($parentEntity, $children);
+        }
+    }
+
+    /**
+     * @param Entity $parentEntity
+     * @param array  $children
+     */
+    private function fetchChildren(Entity $parentEntity, array $children)
+    {
+        foreach($children as $child)
+        {
+            $childEntity = $this->entityMapping->getEntity($child);
+            $relationship = $parentEntity->findRelationship($childEntity->getKey());
+
+            switch (true) {
+
+                case $relationship instanceof InverseRelationship:
+                    $this->fetchInverseRelationship($parentEntity, $childEntity, $relationship);
+                    $this->inverseRelationships[$parentEntity->getKey()][] = $relationship;
+                    break;
+
+                case $relationship instanceof ForeignKey:
+                    $this->fetchForeignKeys($parentEntity, $childEntity, $relationship);
+                    break;
+            }
+        }
+    }
+
+    /**
+     * @param Entity              $parent
+     * @param Entity              $child
+     * @param InverseRelationship $relationship
+     *
+     * @throws \Exception
+     */
+    private function fetchInverseRelationship(Entity $parent, Entity $child, InverseRelationship $relationship)
+    {
+        if(!isset($this->entities[$parent->getKey()]))
+        {
+            throw new \Exception('shits fucked');
+        }
+
+        $parentIds = [];
+        $parentName = is_null($relationship->getParentName()) ? $parent->getKey() : $relationship->getParentName();
+
+        foreach($this->entities[$parent->getKey()] as $parentEntity)
+        {
+            $parentIds = $parentEntity->getId();
+        }
+
+        $this->entities[$child->getKey()] = array_merge(
+            $child->getRepository()->findBy([$parentName => $parentIds]),
+            $this->entities[$child->getKey()]
+        );
+    }
+
+    /**
+     * @param Entity     $parent
+     * @param Entity     $child
+     * @param ForeignKey $relationship
+     *
+     * @throws \Exception
+     */
+    private function fetchForeignKeys(Entity $parent, Entity $child, ForeignKey $relationship)
+    {
+        if(!isset($this->entities[$parent->getKey()]))
+        {
+            throw new \Exception('shits fucked');
+        }
+
+        $relationshipMethod = 'get' . ucfirst($relationship->getChildName());
+        $childIds = [];
+
+        foreach($this->entities[$parent->getKey()] as $parentEntity)
+        {
+            // doctrine's lazy loading means even though we 'get' the relationship, since we only access the ID, it
+            // just pulls the ID from the proxy object, instead of loading the relationship
+            $childIds[] = $parentEntity->$relationshipMethod->getId();
+        }
+
+        $this->entities[$child->getKey()] = array_merge(
+            $child->getRepository()->findBy(['id' => $childIds]),
+            $this->entities[$child->getKey()]
+        );
+    }
+
+    /**
+     *
+     */
+    private function transformEntities()
+    {
+        foreach($this->entities as $entityKey => $entities)
+        {
+            $entityType = $this->entityMapping->getEntity($entityKey);
+            $this->transformEntityType($entityType, $entities);
+        }
+    }
+
+    /**
+     * @param Entity $entityType
+     * @param array  $entities
+     */
+    private function transformEntityType(Entity $entityType, array $entities)
+    {
+        foreach($entities as $entity)
+        {
+            $this->transformEntity($entity, $entityType->getTransformer());
+        }
+    }
+
+    /**
+     *
+     */
+    private function reconstructInverseRelationships()
+    {
+        foreach($this->inverseRelationships as $parentKey => $inverseRelationships)
+        {
+            $parent = $this->entityMapping->getEntity($parentKey);
+
+            $this->reconstructInverseRelationshipsForEntity($parent, $inverseRelationships);
+        }
+    }
+
+    /**
+     * @param Entity $parent
+     * @param array  $inverseRelationships
+     */
+    private function reconstructInverseRelationshipsForEntity(Entity $parent, array $inverseRelationships)
+    {
+        foreach($inverseRelationships as $inverseRelationship)
+        {
+            $this->reconstructInverseRelationship($parent, $inverseRelationship);
+        }
+    }
+
+    /**
+     * @param Entity              $parent
+     * @param InverseRelationship $inverseRelationship
+     */
+    private function reconstructInverseRelationship(Entity $parent, InverseRelationship $inverseRelationship)
+    {
+        foreach($this->transformedEntities[$parent->getKey()] as $parentEntity)
+        {
+            $childIds = $this->findChildrenForInverseRelationship($parent->getKey(), $parentEntity, $inverseRelationship);
+
+            $parentEntity[$inverseRelationship->getTargetEntity()] = $childIds;
+        }
+    }
+
+    /**
+     * @param string              $parentKey
+     * @param array               $transformedEntity
+     * @param InverseRelationship $inverseRelationship
      *
      * @return array
-     * @throws InvalidResourceException
      */
-    private function transformResource($resource, array $includes = [])
-    {
-        switch (true) {
+    private function findChildrenForInverseRelationship(
+        string $parentKey,
+        array $transformedEntity,
+        InverseRelationship $inverseRelationship
+    ) {
+        $childIds = [];
+        $parentName = is_null($inverseRelationship->getParentName()) ? $parentKey : $inverseRelationship->getParentName();
+        $parentRelationshipMethod = 'get' . ucfirst($parentName);
 
-            case $resource instanceof Item:
-
-                return $this->transformItem($resource, $includes);
-
-            case $resource instanceof Collection:
-
-                return $this->transformCollection($resource, $includes);
-
-            case $resource instanceof NullableItem:
-
-                return $this->transformNullableItem($resource, $includes);
-
-            default:
-
-                throw new InvalidResourceException;
-        }
-    }
-
-    /**
-     * @param Item  $item
-     * @param array $includes
-     *
-     * @return mixed
-     */
-    private function transformItem(Item $item, array $includes = [])
-    {
-        $entity = $item->getEntity();
-        $transformer = $item->getTransformer();
-
-        $key = $this->transformEntity($entity, $transformer, $includes);
-
-        return $key;
-    }
-
-    private function transformNullableItem(NullableItem $item, array $includes = [])
-    {
-        $entity = $item->getEntity();
-        $transformer = $item->getTransformer();
-
-        $key = $key = $this->transformEntity($entity, $transformer, $includes, true);
-
-        return $key;
-    }
-
-    /**
-     * @param Collection $collection
-     * @param array      $includes
-     *
-     * @return array
-     */
-    private function transformCollection(Collection $collection, array $includes = [])
-    {
-        $entities = $collection->getEntities();
-        $transformer = $collection->getTransformer();
-
-        $keys = [];
-
-        foreach ($entities as $entity) {
-
-            $key = $this->transformEntity($entity, $transformer, $includes);
-
-            $keys[] = $key;
+        foreach($this->entities[$inverseRelationship->getTargetEntity()] as $entity)
+        {
+            if($entity->$parentRelationshipMethod->getId == $transformedEntity['id'])
+            {
+                $childIds[] = $entity->getId();
+            }
         }
 
-        return $keys;
+        return $childIds;
     }
 
     /**
-     * @param       $entity
-     * @param       $transformer
-     * @param array $includes
-     * @param bool  $nullable
+     * @param $entity
+     * @param $transformer
      *
-     * @return mixed
      * @throws InvalidIdException
-     * @throws MissingIncludeException
      * @throws MissingKeyException
      * @throws MissingTransformException
      */
-    private function transformEntity($entity, $transformer, array $includes = [], $nullable = false)
+    private function transformEntity($entity, $transformer)
     {
         if (!method_exists($transformer, 'transform')) {
             throw new MissingTransformException;
@@ -189,27 +352,7 @@ class DictTransformer
             throw new MissingKeyException;
         }
 
-        if ($nullable && $entity == null) {
-            return null;
-        }
-
         $data = $transformer->transform($entity);
-
-        foreach ($includes as $include) {
-
-            $parsedIncludeString = $this->parseIncludeString($include);
-
-            $current = $parsedIncludeString['current'];
-            $rest = $parsedIncludeString['rest'];
-
-            if (!method_exists($transformer, $current)) {
-                throw new MissingIncludeException(get_class($transformer), $current);
-            }
-
-            $resource = $transformer->{$current}($entity);
-
-            $data[$current] = $this->transformResource($resource, $rest);
-        }
 
         $idField = $this->getIdField($transformer);
 
@@ -217,34 +360,31 @@ class DictTransformer
             throw new InvalidIdException;
         }
 
-        $this->entities[$transformer::KEY][$data[$idField]] = isset($this->entities[$transformer::KEY][$data[$idField]])
-            ? array_merge($this->entities[$transformer::KEY][$data[$idField]], $data)
+        $this->transformedEntities[$transformer::KEY][$data[$idField]] = isset($this->transformedEntities[$transformer::KEY][$data[$idField]])
+            ? array_merge($this->transformedEntities[$transformer::KEY][$data[$idField]], $data)
             : $data;
-
-        return $data[$idField];
     }
 
     /**
      * @param string $includeString
      *
-     * @return array
+     * @return string
      */
-    private function parseIncludeString(string $includeString)
+    private function parseCurrentRelationship(string $includeString)
     {
-        $position = strpos($includeString, '.');
+        $pos1 = strpos($includeString, '.');
+        $pos2 = strpos($includeString, '.', $pos1 + 1);
 
-        if ($position !== false) {
-
+        if($pos2)
+        {
             return [
-                'current' => substr($includeString, 0, $position),
-                'rest'    => [substr($includeString, $position + 1)],
+                'currentParent' => substr($includeString, 0, $pos1),
+                'currentChild' => substr($includeString, $pos1 + 1, $pos2),
+                'rest' => substr($includeString, $pos1 + 1)
             ];
         }
 
-        return [
-            'current' => $includeString,
-            'rest'    => [],
-        ];
+        return false;
     }
 
     /**
